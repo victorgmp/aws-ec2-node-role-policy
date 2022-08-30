@@ -1,0 +1,122 @@
+service: ec2-instance
+frameworkVersion: '^3'
+useDotenv: true
+
+resources:
+  Resources:
+    EC2SecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupName: ec2-security-group
+        GroupDescription: 'EC2 security group'
+        VpcId: !ImportValue VPC-VPCID
+        SecurityGroupEgress:
+          - Description: 'Outbound traffic for third-party integrations'
+            IpProtocol: all
+            FromPort: 1
+            ToPort: 65535
+            CidrIp: 0.0.0.0/0
+        SecurityGroupIngress:
+          - Description: 'Inbound traffic for SSH access'
+            IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: 0.0.0.0/0
+
+    EC2InstanceRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ec2-instance-role
+        AssumeRolePolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - ec2.amazonaws.com
+              Action:
+                - 'sts:AssumeRole'
+        Path: /
+
+    EC2InstanceProfile:
+      Type: AWS::IAM::InstanceProfile
+      Properties:
+        Roles:
+          - !Ref EC2InstanceRole
+
+    EC2InstancePolicy:
+      Type: AWS::IAM::Policy
+      Properties:
+        PolicyName: ec2-instance-policy
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetBucketLocation
+                - s3:GetObject
+              Resource: arn:aws:s3:::{PUT YOUR S3 ARN HERE}
+            - Effect: Allow
+              Action:
+                - cloudformation:DescribeStacks
+              Resource: '*'
+        Roles:
+          - !Ref EC2InstanceRole
+
+    EC2InstanceKey:
+      Type: AWS::EC2::KeyPair
+      Properties:
+        KeyName: ec2-instance-key
+
+    EC2InstanceEIP:
+      Type: AWS::EC2::EIP
+      Properties:
+        InstanceId: !Ref EC2Instance
+        Tags:
+          - Key: Name
+            Value: ec2-instance-eip
+
+    EC2Instance:
+      Type: AWS::EC2::Instance
+      Properties:
+        ImageId: ami-090fa75af13c156b4
+        IamInstanceProfile: !Ref EC2InstanceProfile
+        InstanceType: t2.micro
+        KeyName: !Ref EC2InstanceKey
+        Tags:
+          - Key: Name
+            Value: ec2-instance
+        SubnetId: ${cf:vpc.PublicSubnet2}
+        SecurityGroupIds:
+          - !Ref EC2SecurityGroup
+        UserData:
+          Fn::Base64:
+            !Sub |
+              Content-Type: multipart/mixed; boundary="//"
+              MIME-Version: 1.0
+
+              --//
+              Content-Type: text/cloud-config; charset="us-ascii"
+              MIME-Version: 1.0
+              Content-Transfer-Encoding: 7bit
+              Content-Disposition: attachment; filename="cloud-config.txt"
+
+              #cloud-config
+              cloud_final_modules:
+              - [scripts-user, always]
+
+              --//
+              Content-Type: text/x-shellscript; charset="us-ascii"
+              MIME-Version: 1.0
+              Content-Transfer-Encoding: 7bit
+              Content-Disposition: attachment; filename="userdata.txt"
+
+              #!/bin/bash
+              yum update -y && yum install -y unzip
+              runuser -l ec2-user -c 'curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.1/install.sh | bash'
+              runuser -l ec2-user -c '. ~/.nvm/nvm.sh'
+              runuser -l ec2-user -c 'nvm install lts/fermium && nvm install-latest-npm'
+              runuser -l ec2-user -c 'npm install -g pm2@latest'
+
+              runuser -l ec2-user -c 'aws s3 cp s3://PUT-HERE-S3-BUCKET-URL ~/'
+              runuser -l ec2-user -c 'unzip -o app_code.zip -d app_code && rm app_code.zip'
+              runuser -l ec2-user -c 'cd ~/app_code && npm install && npm start'
